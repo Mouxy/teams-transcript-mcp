@@ -61,7 +61,8 @@ For either mode:
 
 - Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/)
-- A Microsoft 365 tenant with Teams transcription enabled
+- A Microsoft 365 tenant with Teams transcription enabled and Microsoft Graph
+  transcript access allowed in the global Teams meeting configuration
 - An Entra administrator who can create app registrations and grant consent
 
 For cloud mode:
@@ -141,6 +142,24 @@ combined PEM to Container Apps as a secret.
    **Granted for** your tenant. Clicking the consent button alone is not proof.
 4. Open **Properties**, set **Assignment required?** to **Yes**, and save.
 5. Assign only the intended pilot users or group under **Users and groups**.
+
+In the Teams admin centre, open **Meetings → Meeting settings → Transcript API
+access** and enable **Microsoft Graph access**. This tenant-wide switch is off by
+default and blocks every transcript API request with `403
+GraphAccessToTranscriptsDisabled`, regardless of Entra permissions or consent.
+Enable **Speaker attribution** as well if the deployment will retrieve VTT with
+speaker names, as this implementation does.
+
+The equivalent Teams PowerShell command is:
+
+```powershell
+Set-CsTeamsMeetingConfiguration -Identity Global `
+  -EnableGraphTranscriptAccess $true `
+  -EnableAttributedTranscripts $true
+```
+
+This requires an appropriate Teams administrator role. Treat it as a tenant-wide
+policy change, not as part of the app registration.
 
 Use the Entra portal for consent. Direct `adminconsent` URLs are prone to
 browser-session failures and are not part of this setup.

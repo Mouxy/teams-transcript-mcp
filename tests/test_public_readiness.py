@@ -39,6 +39,13 @@ def test_deployment_requires_subscription_and_tenant():
     assert "registrationState" in deploy
 
 
+def test_deployment_pins_and_validates_attendance_mode():
+    deploy = (ROOT / "scripts" / "deploy_azure.sh").read_text()
+    assert 'ATTENDANCE_MODE="${ATTENDANCE_MODE:-invite}"' in deploy
+    assert 'TRANSCRIPT_SYNC_ATTENDANCE_MODE=$ATTENDANCE_MODE' in deploy
+    assert 'strict|invite' in deploy
+
+
 def test_deployment_uploads_certificate_content_not_a_local_path():
     deploy = (ROOT / "scripts" / "deploy_azure.sh").read_text()
     assert 'cloud-cert-pem=@"$CERT_PEM"' not in deploy

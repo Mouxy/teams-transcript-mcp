@@ -14,8 +14,14 @@ ENV_NAME="${ENV_NAME:-cae-transcript-sync}"
 APP_NAME="${APP_NAME:-transcript-sync}"
 LAW_NAME="${LAW_NAME:-law-transcript-sync}"
 DISPLAY_NAME="${DISPLAY_NAME:-Transcript Sync Cloud}"
+ATTENDANCE_MODE="${ATTENDANCE_MODE:-invite}"
 CERT_PEM="${CERT_PEM:-$HOME/.transcript-sync/cloud-cert.pem}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+case "$ATTENDANCE_MODE" in
+  strict|invite) ;;
+  *) echo "ATTENDANCE_MODE must be 'strict' or 'invite'." >&2; exit 2 ;;
+esac
 
 if [[ ! -f "$CERT_PEM" ]]; then
   printf 'Certificate not found: %s\n' "$CERT_PEM" >&2
@@ -109,6 +115,7 @@ az containerapp update \
     "TRANSCRIPT_SYNC_CLOUD_CLIENT_ID=$CLOUD_CLIENT_ID" \
     "TRANSCRIPT_SYNC_SERVER_URL=$SERVER_URL" \
     "TRANSCRIPT_SYNC_APP_NAME=$DISPLAY_NAME" \
+    "TRANSCRIPT_SYNC_ATTENDANCE_MODE=$ATTENDANCE_MODE" \
     "TRANSCRIPT_SYNC_CLOUD_CERT_PEM=secretref:cloud-cert-pem" \
   -o none
 
