@@ -1,0 +1,23 @@
+# Python / env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Secrets and credentials — never commit
+.env
+*.pem
+*.key
+*.crt
+
+# Runtime state / sensitive output
+audit.log
+.transcript-sync/
+
+# OS
+.DS_Store
