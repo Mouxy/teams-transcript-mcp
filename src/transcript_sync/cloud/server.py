@@ -169,6 +169,15 @@ class EntraAuthASGIMiddleware:
             try:
                 claims = _validator.validate(token)
             except TokenValidationError as exc:
+                # Safe diagnostic: PyJWT validation reasons contain claim names
+                # or expected audiences/issuers, never the bearer token itself.
+                # This lets Container Apps logs distinguish OAuth/token failures
+                # without credential or transcript logging.
+                print(
+                    f"AUTH_REJECT {json.dumps({'reason': str(exc)[:300]})}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 await self._reject(send, f"invalid_token: {exc}")
                 return
         else:
