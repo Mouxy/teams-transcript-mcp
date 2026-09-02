@@ -40,6 +40,36 @@ class _NoTranscriptCollection(Exception):
     """Internal: the transcripts collection is empty/absent for the meeting."""
 
 
+_SAFE_GRAPH_403_CODES = {
+    "GraphAccessToTranscriptsDisabled",
+    "SpeakerAttributionNotAllowed",
+}
+
+
+def _safe_graph_error(response, path: str) -> tuple[str, str]:
+    """Return finite-allowlisted inner code and endpoint class, never IDs/body."""
+    try:
+        error = response.json().get("error") or {}
+        inner = error.get("innerError") or {}
+        candidate = inner.get("code")
+    except (AttributeError, TypeError, ValueError):
+        candidate = None
+    code = (
+        candidate
+        if isinstance(candidate, str) and candidate in _SAFE_GRAPH_403_CODES
+        else "Forbidden"
+    )
+    if "/transcripts/" in path and path.rstrip("/").endswith("content"):
+        operation = "transcript_content"
+    elif path.rstrip("/").endswith("transcripts"):
+        operation = "transcript_list"
+    elif "attendanceReports" in path:
+        operation = "attendance_report"
+    else:
+        operation = "graph_request"
+    return code, operation
+
+
 def _get(token: str, path: str, params: dict | None = None, raw: bool = False,
          max_retries: int = 3):
     """GET with status-specific errors, Retry-After on 429, backoff on 5xx."""
@@ -60,10 +90,8 @@ def _get(token: str, path: str, params: dict | None = None, raw: bool = False,
         if status == 401:
             raise AuthExpiredError(f"401 from Graph on {path} — sign in again.")
         if status == 403:
-            raise AccessDeniedError(
-                f"403 from Graph on {path}. This is a permissions denial, NOT a "
-                "missing artifact. Response: " + response.text[:300]
-            )
+            code, operation = _safe_graph_error(response, path)
+            raise AccessDeniedError(f"Graph 403 code={code} operation={operation}")
         if status == 404:
             if "transcripts" in path:
                 if path.rstrip("/").endswith("transcripts"):

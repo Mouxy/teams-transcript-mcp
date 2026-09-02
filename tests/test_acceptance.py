@@ -128,11 +128,50 @@ class FakeResponse:
         raise requests.HTTPError(f"{self.status_code}", response=self)
 
 
-def test_403_raises_access_denied(monkeypatch):
+def test_403_raises_access_denied_with_safe_graph_code(monkeypatch):
+    body = {
+        "error": {
+            "code": "Forbidden",
+            "message": "sensitive provider detail",
+            "innerError": {"code": "SpeakerAttributionNotAllowed"},
+        }
+    }
     monkeypatch.setattr(graph.requests, "get",
-                        lambda *a, **k: FakeResponse(403, {"error": {"code": "Forbidden"}}))
-    with pytest.raises(graph.AccessDeniedError):
-        graph._get("tok", "/me/onlineMeetings/x/transcripts")
+                        lambda *a, **k: FakeResponse(403, body))
+    path = "/me/onlineMeetings/secret-meeting/transcripts/secret-transcript/content"
+    with pytest.raises(graph.AccessDeniedError) as caught:
+        graph._get("tok", path)
+    detail = str(caught.value)
+    assert "SpeakerAttributionNotAllowed" in detail
+    assert "transcript_content" in detail
+    assert "secret-meeting" not in detail
+    assert "secret-transcript" not in detail
+    assert "sensitive provider detail" not in detail
+
+
+def test_403_unknown_codes_are_not_logged(monkeypatch):
+    body = {
+        "error": {
+            "code": "TOP_LEVEL_SECRET_456",
+            "innerError": {"code": "SECRET_TRANSCRIPT_ID_123"},
+        }
+    }
+    monkeypatch.setattr(graph.requests, "get",
+                        lambda *a, **k: FakeResponse(403, body))
+    with pytest.raises(graph.AccessDeniedError) as caught:
+        graph._get("tok", "/me/onlineMeetings/x/transcripts/y/content")
+    detail = str(caught.value)
+    assert "code=Forbidden" in detail
+    assert "SECRET_TRANSCRIPT_ID_123" not in detail
+    assert "TOP_LEVEL_SECRET_456" not in detail
+
+
+def test_403_non_string_inner_code_maps_to_forbidden(monkeypatch):
+    body = {"error": {"innerError": {"code": ["not", "hashable"]}}}
+    monkeypatch.setattr(graph.requests, "get",
+                        lambda *a, **k: FakeResponse(403, body))
+    with pytest.raises(graph.AccessDeniedError, match="code=Forbidden"):
+        graph._get("tok", "/me/onlineMeetings/x/transcripts/y/content")
 
 
 def test_401_raises_auth_expired(monkeypatch):
