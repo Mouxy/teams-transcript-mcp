@@ -323,6 +323,32 @@ For a cloud deployment:
 
 The automated test suite mocks Microsoft Graph and makes no live tenant calls.
 
+## OAuth troubleshooting
+
+Claude's connector error identifies the failing stage:
+
+- **No Entra sign-in record:** Entra rejected the authorisation request before
+  authentication. Check the callback URI and confirm the OAuth `resource` and
+  requested scope share the exact public HTTPS origin.
+- **Microsoft sign-in succeeds, then `McpAuthorizationError`:** the connector
+  exchanged the code, but the MCP server rejected the access token. Check
+  Container Apps logs for `AUTH_REJECT`; this diagnostic contains only the
+  validation reason and never the token.
+- **`Audience doesn't match`:** do not validate a v2 access token against the
+  HTTPS Application ID URI. Entra v2 access tokens put the API's Application
+  (client) ID GUID in `aud`. `TRANSCRIPT_SYNC_CLOUD_CLIENT_ID` is therefore the
+  sole accepted JWT audience. The HTTPS origin remains the OAuth resource and
+  scope prefix used by Claude and Entra.
+- **`AADSTS65001` during a tool call:** the connector token was accepted, but
+  the OBO exchange lacks tenant consent for one or more delegated Graph scopes.
+  Grant admin consent through the Enterprise application and verify the grant.
+- **`Task group is not initialized`:** the outer ASGI application is not
+  propagating the FastMCP session-manager lifespan.
+
+Never paste callback URLs containing `code=` into tickets or chat. The code is
+short-lived and single-use, but it is still an OAuth credential. Use the final
+Claude error URL and secret-free `AUTH_REJECT` log instead.
+
 ## Data boundary and privacy
 
 A transcript returned by this server leaves Microsoft 365 and enters the MCP
