@@ -7,7 +7,9 @@ Microsoft Graph.
 It supports two transports:
 
 - **Cloud:** streamable HTTP, Microsoft Entra OAuth and an on-behalf-of (OBO)
-  exchange. This is suitable for a managed Claude custom connector.
+  exchange. The current release retrieves transcripts with the delegated user
+  token and therefore remains subject to that user's native Teams transcript
+  entitlement.
 - **Local:** stdio, interactive Microsoft sign-in and an OS-keyring token cache.
 
 This project is not affiliated with Microsoft or Anthropic.
@@ -39,6 +41,13 @@ Cloud MCP client ──HTTPS──> Transcript Sync
 
 The cloud process keeps caches per Entra object ID. It does not share meeting
 state between users. Scale-to-zero cold starts only clear those caches.
+
+> **Current limitation:** the deployed cloud path is delegated-only. A
+> certificate credential does not make its Graph calls app-only. The required
+> design for calendar/invite authorisation plus sharing-independent backend
+> retrieval is specified in
+> [Hybrid cloud transcript access](docs/hybrid-cloud-access.md), but is not yet
+> implemented.
 
 ## Security model
 
@@ -77,6 +86,8 @@ For cloud mode:
 
 ## Required Microsoft Graph permissions
 
+### Current delegated implementation
+
 Add these as **delegated** permissions to the Entra app:
 
 - `Calendars.Read`
@@ -87,6 +98,25 @@ Add these as **delegated** permissions to the Entra app:
 The last permission supports strict attendance checks. The default invite mode
 still requests the same fixed scope set so switching modes does not silently
 change consent.
+
+These scopes do not grant the backend independent access to transcript content.
+Microsoft can return transcript metadata and still deny content based on the
+signed-in user's Teams entitlement.
+
+### Hybrid sharing-independent cloud design
+
+The target cloud architecture keeps `Calendars.Read` delegated and adds these
+**application** permissions:
+
+- `OnlineMeetings.Read.All`
+- `OnlineMeetingTranscript.Read.All`
+- `OnlineMeetingArtifact.Read.All`
+
+It also requires tenant admin consent, a Teams application access policy, and
+runtime code that uses separate delegated and app-only tokens. Granting the
+roles alone does not upgrade the current release. See
+[Hybrid cloud transcript access](docs/hybrid-cloud-access.md) for the complete
+permission model, Teams PowerShell policy, limitations and rollout checks.
 
 ## Cloud setup
 
@@ -103,7 +133,9 @@ In the Microsoft Entra admin centre:
    - `https://claude.ai/api/mcp/auth_callback`
    - `https://claude.com/api/mcp/auth_callback`
 7. Under **API permissions**, add the four delegated Microsoft Graph
-   permissions listed above.
+   permissions listed above for the current release. Do not add the hybrid
+   application roles and assume they are active until the runtime supports the
+   app-only artifact path described in the design document.
 8. Under **Expose an API**, set an initial Application ID URI of
    `api://<client-id>` and add a delegated scope named `access_as_user`.
 9. Under **Certificates & secrets**, create a client secret for the MCP
