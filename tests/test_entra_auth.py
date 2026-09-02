@@ -53,7 +53,7 @@ def _validator(monkeypatch):
 def _token(overrides: dict | None = None, exp_delta: int = 3600) -> str:
     now = int(time.time())
     claims = {
-        "iss": ISSUER, "aud": f"api://{CLIENT}", "iat": now, "nbf": now - 60,
+        "iss": ISSUER, "aud": CLIENT, "iat": now, "nbf": now - 60,
         "exp": now + exp_delta, "oid": "user-oid-123",
         "preferred_username": "user@example.com",
         "scp": "access_as_user",
@@ -91,7 +91,7 @@ def test_expired_rejected(monkeypatch):
 def test_missing_oid_rejected(monkeypatch):
     v = _validator(monkeypatch)
     token = pyjwt.encode(
-        {"iss": ISSUER, "aud": f"api://{CLIENT}", "iat": int(time.time()),
+        {"iss": ISSUER, "aud": CLIENT, "iat": int(time.time()),
          "exp": int(time.time()) + 3600},
         _key, algorithm="RS256", headers={"kid": "test-key"})
     with pytest.raises(TokenValidationError):
@@ -106,7 +106,7 @@ def test_missing_or_wrong_delegated_scope_rejected(monkeypatch):
         v.validate(_token({"scp": "unrelated.scope"}))
 
 
-def test_server_url_is_the_only_runtime_audience(monkeypatch):
+def test_v2_client_id_is_the_only_runtime_audience(monkeypatch):
     server_url = "https://mcp.example.com"
     v = EntraTokenValidator(TENANT, CLIENT, server_url=server_url)
 
@@ -121,7 +121,9 @@ def test_server_url_is_the_only_runtime_audience(monkeypatch):
         "transcript_sync.cloud.entra_auth.requests.get",
         lambda *args, **kwargs: FakeResp(),
     )
-    claims = v.validate(_token({"aud": server_url}))
-    assert claims["aud"] == server_url
+    claims = v.validate(_token({"aud": CLIENT}))
+    assert claims["aud"] == CLIENT
+    with pytest.raises(TokenValidationError):
+        v.validate(_token({"aud": server_url}))
     with pytest.raises(TokenValidationError):
         v.validate(_token({"aud": f"api://{CLIENT}"}))

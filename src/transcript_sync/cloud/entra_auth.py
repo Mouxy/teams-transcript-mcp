@@ -1,8 +1,8 @@
 """Entra ID bearer-token validation for the cloud MCP surface.
 
-Validates v2.0 access tokens issued for this API. The accepted audience is the
-configured server URL. Client-ID audiences are accepted only when a caller
-constructs the validator without a server URL, such as an isolated unit test.
+Validates v2.0 access tokens issued for this API. Microsoft Entra v2 access
+tokens use the API's application (client) ID GUID as the `aud` claim, even when
+the OAuth resource/scope is an HTTPS Application ID URI.
 Users exchange these for Graph tokens via OBO (obo.py) — the incoming token
 never reaches Graph directly.
 """
@@ -28,11 +28,7 @@ class EntraTokenValidator:
                  jwks_ttl: int = 3600):
         self.tenant_id = tenant_id
         self.issuer = ISSUER.format(tenant=tenant_id)
-        self.audiences = (
-            (server_url,)
-            if server_url
-            else tuple(a for a in (f"api://{client_id}", client_id) if a)
-        )
+        self.audiences = (client_id,)
         self.required_scope = "access_as_user"
         self._jwks_url = JWKS_URL.format(tenant=tenant_id)
         self._keys: dict[str, PyJWK] = {}

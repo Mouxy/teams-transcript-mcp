@@ -42,7 +42,7 @@ state between users. Scale-to-zero cold starts only clear those caches.
 
 ## Security model
 
-- Cloud requests validate the Entra issuer, exact server-URL audience, expiry,
+- Cloud requests validate the Entra issuer, exact API client-ID audience, expiry,
   object ID and delegated `access_as_user` scope before OBO exchange.
 - A caller must be the meeting organiser or an accepted attendee.
 - The server resolves opaque meeting handles only through `/me/events/{id}`.
