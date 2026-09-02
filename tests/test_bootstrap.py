@@ -120,6 +120,17 @@ def test_existing_certificate_is_verified_by_thumbprint():
     ) is False
 
 
+def test_existing_certificate_accepts_graph_hex_thumbprint():
+    class FakeCertificate:
+        @staticmethod
+        def fingerprint(algorithm):
+            return b"\x03\xf3\x09\x04"
+
+    assert create_cloud_app.certificate_is_registered(
+        FakeCertificate(), [{"customKeyIdentifier": "03F30904"}]
+    ) is True
+
+
 def test_existing_named_local_app_requires_explicit_client_id(monkeypatch):
     calls = []
 

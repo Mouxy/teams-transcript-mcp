@@ -167,11 +167,15 @@ def load_certificate_identity(pem: bytes) -> x509.Certificate:
 def certificate_is_registered(
     certificate: x509.Certificate, key_credentials: list[dict]
 ) -> bool:
-    expected = base64.b64encode(
-        certificate.fingerprint(hashes.SHA1())
-    ).decode()
+    fingerprint = certificate.fingerprint(hashes.SHA1())
+    # Graph has returned customKeyIdentifier in both documented base64 and
+    # uppercase hexadecimal forms across tenants. Accept either representation.
+    expected = {
+        base64.b64encode(fingerprint).decode(),
+        fingerprint.hex().upper(),
+    }
     return any(
-        credential.get("customKeyIdentifier") == expected
+        credential.get("customKeyIdentifier") in expected
         for credential in key_credentials
     )
 
@@ -236,6 +240,23 @@ def main() -> None:
         f"/applications/{app_obj_id}",
         params={"$select": "id,appId,api,web,keyCredentials"},
     ))
+    # Shortly after a key write, GET /applications/{object-id} can return an
+    # empty keyCredentials array while the filtered collection endpoint already
+    # has the committed key. Use the latter as the credential source of truth.
+    credential_matches = cast(dict[str, Any], graph_call(
+        token,
+        "GET",
+        "/applications",
+        params={
+            "$filter": f"appId eq '{_odata_literal(app['appId'])}'",
+            "$select": "id,keyCredentials",
+        },
+    )).get("value", [])
+    registered_credentials = (
+        credential_matches[0].get("keyCredentials", [])
+        if len(credential_matches) == 1
+        else details.get("keyCredentials", [])
+    )
     existing_certificate = None
     if cert_out.exists():
         try:
@@ -243,7 +264,7 @@ def main() -> None:
         except (TypeError, ValueError) as exc:
             sys.exit(f"Invalid combined certificate PEM at {cert_out}: {exc}")
         if not certificate_is_registered(
-            existing_certificate, details.get("keyCredentials", [])
+            existing_certificate, registered_credentials
         ):
             sys.exit(
                 f"The certificate at {cert_out} is not registered on app "
