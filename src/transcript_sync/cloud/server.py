@@ -1,9 +1,10 @@
-"""Transcript Sync cloud server — streamable-HTTP MCP with Entra OAuth + OBO.
+"""Transcript Sync cloud server — Entra-authenticated, app-only Graph MCP.
 
 Auth chain per request:
   Claude connector -> bearer token (aud = this API) -> EntraAuthASGIMiddleware
   validates (signature/issuer/audience/expiry) -> claims into ASGI scope ->
-  tools OBO-exchange for a Graph token -> transcript_sync.core enforcement.
+  tools acquire an application Graph token -> transcript_sync.core enforcement
+  pins calendar access to the validated caller oid.
 
 Enforcement lives in core.py — identical to the local pilot. Per-user state
 (meeting-list cache) is keyed by the token's oid claim; there is no shared
@@ -21,16 +22,16 @@ import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
 
 from .. import core
-from . import obo
+from . import app_auth
 from .entra_auth import EntraTokenValidator, TokenValidationError
 
 TENANT_ID = os.environ.get("TRANSCRIPT_SYNC_TENANT_ID", "")
 CLIENT_ID = os.environ.get("TRANSCRIPT_SYNC_CLOUD_CLIENT_ID", "")
 SERVER_URL = os.environ.get("TRANSCRIPT_SYNC_SERVER_URL", "")  # public base URL
 APP_DISPLAY_NAME = os.environ.get("TRANSCRIPT_SYNC_APP_NAME", "Transcript Sync Cloud")
-ATTENDANCE_MODE = os.environ.get("TRANSCRIPT_SYNC_ATTENDANCE_MODE", "invite").lower()
-if ATTENDANCE_MODE not in ("strict", "invite"):
-    raise RuntimeError(f"Invalid TRANSCRIPT_SYNC_ATTENDANCE_MODE: {ATTENDANCE_MODE}")
+ACCESS_GATE = os.environ.get("TRANSCRIPT_SYNC_ACCESS_GATE", "invited").lower()
+if ACCESS_GATE not in core.graph.ACCESS_GATES:
+    raise RuntimeError(f"Invalid TRANSCRIPT_SYNC_ACCESS_GATE: {ACCESS_GATE}")
 
 mcp = FastMCP("transcript-sync-cloud", host="0.0.0.0", port=8000)
 _validator = (
@@ -58,7 +59,7 @@ def _cloud_audit(user: str, meeting: dict | None, meeting_id: str, result: str,
         "meeting_id": meeting_id or None,
         "occurrence_start": meeting.get("start") if meeting else None,
         "result": result,
-        "attendance_mode": ATTENDANCE_MODE,
+        "access_gate": ACCESS_GATE,
         "attendance_seconds": attendance_seconds,
         "detail": detail[:200],
     }
@@ -78,31 +79,27 @@ def _identity(ctx: Context) -> tuple[str, str, str]:
 
 
 def _ctx_for(ctx: Context) -> core.FetchContext:
-    oid, email, bearer = _identity(ctx)
+    oid, email, _ = _identity(ctx)
     return core.FetchContext(
-        token=obo.graph_token(oid, bearer),
+        token=app_auth.graph_token(),
         user_email=email,
-        attendance_mode=ATTENDANCE_MODE,
+        access_gate=ACCESS_GATE,
         audit=lambda m, mid, res, det="", secs=None: _cloud_audit(
             email, m, mid, res, det, secs),
+        graph_user_id=oid,
     )
 
 
-def _obo_guard(fn):
-    """Map OBO consent failures to a machine-checkable not_authorized error."""
+def _application_guard(fn):
+    """Map application-token failures to a machine-checkable server error."""
     try:
         return fn()
-    except obo.OboError as exc:
-        consent_hint = (
-            "AADSTS65001" in str(exc)
-            and " An administrator must grant consent in the Entra portal "
-              f"(Enterprise applications → {APP_DISPLAY_NAME} "
-              "→ Permissions → Grant admin consent)." or ""
-        )
-        return {"status": "error", "error_code": "not_authorized",
-                "message": f"Authorization required for '{APP_DISPLAY_NAME}'."
-                           f"{consent_hint}",
-                "detail": str(exc)[:300]}
+    except app_auth.ApplicationTokenError:
+        return {
+            "status": "error",
+            "error_code": "server_not_authorized",
+            "message": f"'{APP_DISPLAY_NAME}' cannot authenticate to Microsoft Graph.",
+        }
     except PermissionError as exc:
         return {"status": "error", "error_code": "not_authorized",
                 "message": str(exc)}
@@ -124,7 +121,7 @@ def list_recent_meetings(ctx: Context, days: int = 7,
         _user_meetings[oid] = meetings
         return payload
 
-    return _obo_guard(run)
+    return _application_guard(run)
 
 
 @mcp.tool()
@@ -145,7 +142,7 @@ def get_transcript(ctx: Context, meeting: str, raw_vtt: bool = False) -> dict:
             return error
         return core.fetch_transcript(fetch_ctx, target, raw_vtt)
 
-    return _obo_guard(run)
+    return _application_guard(run)
 
 
 class EntraAuthASGIMiddleware:

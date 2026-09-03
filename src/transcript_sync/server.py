@@ -24,13 +24,10 @@ mcp = FastMCP("transcript-sync")
 AUDIT_DIR = Path.home() / ".transcript-sync"
 AUDIT_LOG = AUDIT_DIR / "audit.log"
 
-# invite (default): accepted invitation or organizer is sufficient and
-# matches Teams' own trust model.
-# strict: additionally requires a Teams attendance report proving the user
-# joined. Blocked tenant-wide today (delegated 403 on attendanceReports).
-ATTENDANCE_MODE = os.environ.get("TRANSCRIPT_SYNC_ATTENDANCE_MODE", "invite").lower()
-if ATTENDANCE_MODE not in ("strict", "invite"):
-    raise RuntimeError(f"Invalid TRANSCRIPT_SYNC_ATTENDANCE_MODE: {ATTENDANCE_MODE}")
+# One canonical policy choice: invited (default), accepted or attended.
+ACCESS_GATE = os.environ.get("TRANSCRIPT_SYNC_ACCESS_GATE", "invited").lower()
+if ACCESS_GATE not in core.graph.ACCESS_GATES:
+    raise RuntimeError(f"Invalid TRANSCRIPT_SYNC_ACCESS_GATE: {ACCESS_GATE}")
 
 # In-memory cache for index-based selection. Single-user stdio process only —
 # never reuse this pattern multi-user (the cloud server keys state per user).
@@ -41,7 +38,7 @@ def _ctx() -> core.FetchContext:
     return core.FetchContext(
         token=auth.get_token(),
         user_email=auth.auth_status().get("account") or "",
-        attendance_mode=ATTENDANCE_MODE,
+        access_gate=ACCESS_GATE,
         audit=_audit,
     )
 
@@ -59,7 +56,7 @@ def _audit(meeting: dict | None, meeting_id: str, result: str, detail: str = "",
         "meeting_id": meeting_id or None,
         "occurrence_start": meeting.get("start") if meeting else None,
         "result": result,
-        "attendance_mode": ATTENDANCE_MODE,
+        "access_gate": ACCESS_GATE,
         "attendance_seconds": attendance_seconds,
         "detail": detail[:200],
     }

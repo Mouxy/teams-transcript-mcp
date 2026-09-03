@@ -14,13 +14,13 @@ ENV_NAME="${ENV_NAME:-cae-transcript-sync}"
 APP_NAME="${APP_NAME:-transcript-sync}"
 LAW_NAME="${LAW_NAME:-law-transcript-sync}"
 DISPLAY_NAME="${DISPLAY_NAME:-Transcript Sync Cloud}"
-ATTENDANCE_MODE="${ATTENDANCE_MODE:-invite}"
+ACCESS_GATE="${ACCESS_GATE:-invited}"
 CERT_PEM="${CERT_PEM:-$HOME/.transcript-sync/cloud-cert.pem}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-case "$ATTENDANCE_MODE" in
-  strict|invite) ;;
-  *) echo "ATTENDANCE_MODE must be 'strict' or 'invite'." >&2; exit 2 ;;
+case "$ACCESS_GATE" in
+  invited|accepted|attended) ;;
+  *) echo "ACCESS_GATE must be 'invited', 'accepted' or 'attended'." >&2; exit 2 ;;
 esac
 
 if [[ ! -f "$CERT_PEM" ]]; then
@@ -110,12 +110,13 @@ SERVER_URL="https://$FQDN"
 az containerapp update \
   --name "$APP_NAME" --resource-group "$RG" \
   --min-replicas 0 --max-replicas 2 \
+  --remove-env-vars TRANSCRIPT_SYNC_ATTENDANCE_MODE \
   --set-env-vars \
     "TRANSCRIPT_SYNC_TENANT_ID=$TENANT_ID" \
     "TRANSCRIPT_SYNC_CLOUD_CLIENT_ID=$CLOUD_CLIENT_ID" \
     "TRANSCRIPT_SYNC_SERVER_URL=$SERVER_URL" \
     "TRANSCRIPT_SYNC_APP_NAME=$DISPLAY_NAME" \
-    "TRANSCRIPT_SYNC_ATTENDANCE_MODE=$ATTENDANCE_MODE" \
+    "TRANSCRIPT_SYNC_ACCESS_GATE=$ACCESS_GATE" \
     "TRANSCRIPT_SYNC_CLOUD_CERT_PEM=secretref:cloud-cert-pem" \
   -o none
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from transcript_sync.cloud import obo
+from transcript_sync.cloud import app_auth
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "create_cloud_app.py"
@@ -19,6 +19,16 @@ SPEC = importlib.util.spec_from_file_location("create_cloud_app", SCRIPT)
 assert SPEC and SPEC.loader
 create_cloud_app = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(create_cloud_app)
+
+
+def test_cloud_bootstrap_requests_only_required_application_roles():
+    assert create_cloud_app.APPLICATION_ROLES == [
+        "Calendars.Read",
+        "OnlineMeetings.Read.All",
+        "OnlineMeetingTranscript.Read.All",
+        "OnlineMeetingArtifact.Read.All",
+    ]
+    assert "OnlineMeetingRecording.Read.All" not in create_cloud_app.APPLICATION_ROLES
 
 LOCAL_SCRIPT = ROOT / "scripts" / "create_entra_app.py"
 LOCAL_SPEC = importlib.util.spec_from_file_location("create_entra_app_test", LOCAL_SCRIPT)
@@ -176,20 +186,24 @@ def test_explicit_local_client_id_converges_exact_app(monkeypatch):
     assert any(method == "PATCH" for method, *_ in calls)
 
 
-def test_cloud_bootstrap_creates_private_obo_pem_and_uploads_certificate(
+def test_cloud_bootstrap_creates_private_app_pem_and_uploads_certificate(
     monkeypatch, tmp_path
 ):
     calls = []
-    graph_scopes = [
-        {"value": name, "id": f"scope-{index}"}
-        for index, name in enumerate(create_cloud_app.DELEGATED_SCOPES)
+    graph_roles = [
+        {
+            "value": name,
+            "id": f"role-{index}",
+            "allowedMemberTypes": ["Application"],
+        }
+        for index, name in enumerate(create_cloud_app.APPLICATION_ROLES)
     ]
 
     def fake_graph_call(token, method, path, body=None, params=None):
         calls.append((method, path, body, params))
         if method == "GET" and path == "/servicePrincipals":
-            if params and params.get("$select") == "oauth2PermissionScopes":
-                return {"value": [{"oauth2PermissionScopes": graph_scopes}]}
+            if params and params.get("$select") == "appRoles":
+                return {"value": [{"appRoles": graph_roles}]}
             return {"value": []}
         if method == "GET" and path == "/applications":
             return {"value": []}
@@ -234,21 +248,28 @@ def test_cloud_bootstrap_creates_private_obo_pem_and_uploads_certificate(
         if method == "PATCH" and body and "keyCredentials" in body
     ]
     assert len(uploaded_credentials) == 1
-    assert uploaded_credentials[0][0]["displayName"] == "transcript-sync-cloud-obo"
+    assert uploaded_credentials[0][0]["displayName"] == "transcript-sync-cloud-app-auth"
+    manifest_updates = [
+        body["requiredResourceAccess"][0]["resourceAccess"]
+        for method, _, body, _ in calls
+        if method == "PATCH" and body and "requiredResourceAccess" in body
+    ]
+    assert len(manifest_updates) == 1
+    assert all(permission["type"] == "Role" for permission in manifest_updates[0])
 
-    monkeypatch.setattr(obo, "CERT_PEM_PATH", pem)
-    credential = obo._client_credential()
+    monkeypatch.setattr(app_auth, "CERT_PEM_PATH", pem)
+    credential = app_auth._client_credential()
     assert credential["private_key"] == pem
     assert len(credential["thumbprint"]) == 40
 
 
-def test_obo_pem_source_accepts_multiline_secret_content(tmp_path):
+def test_app_auth_pem_source_accepts_multiline_secret_content(tmp_path):
     pem = (
         "-----BEGIN " + "PRIVATE KEY-----\nexample\n-----END "
         + "PRIVATE KEY-----\n"
     )
-    assert obo._pem_bytes(pem) == pem.encode()
+    assert app_auth._pem_bytes(pem) == pem.encode()
 
     pem_path = tmp_path / "credential.pem"
     pem_path.write_text(pem)
-    assert obo._pem_bytes(str(pem_path)) == pem.encode()
+    assert app_auth._pem_bytes(str(pem_path)) == pem.encode()

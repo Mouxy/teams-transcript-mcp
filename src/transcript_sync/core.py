@@ -1,8 +1,8 @@
 """Shared fetch pipeline: calendar-derived identity -> gates -> transcript.
 
-Used by the local stdio server (Keychain token) and the cloud server
-(OBO-exchanged token). All enforcement lives HERE, not in the transports,
-so both surfaces have identical security behaviour.
+Used by the local stdio server (delegated Keychain token) and the cloud server
+(application token pinned to the validated caller oid). All enforcement lives
+HERE, not in the transports, so both surfaces have identical policy behaviour.
 
 Tool contract (per the revised tool spec):
 - list_recent_meetings returns structured JSON with a stable opaque occurrence
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ MAX_TRANSCRIPT_CHARS = 200_000
 SUBJECT_SEARCH_DAYS = 60
 LIST_LIMIT = 100
 PROBE_WORKERS = 5
+_EVENT_ID = re.compile(r"^AAMk[A-Za-z0-9_+/=-]+$")
 
 # audit: callable(meeting, meeting_id, result, detail, attendance_seconds)
 AuditFn = Callable[[dict | None, str, str, str, int | None], None]
@@ -35,8 +37,11 @@ AuditFn = Callable[[dict | None, str, str, str, int | None], None]
 class FetchContext:
     token: str
     user_email: str
-    attendance_mode: str  # "invite" | "strict"
+    access_gate: str  # "invited" | "accepted" | "attended"
     audit: AuditFn
+    # None means a delegated /me token. Cloud app-only mode pins every calendar
+    # call to the oid from the validated connector bearer token.
+    graph_user_id: str | None = None
 
 
 # ---------- opaque occurrence ids ----------
@@ -71,7 +76,7 @@ def _iso_z(value: str | None) -> str | None:
 
 # ---------- transcript availability probe ----------
 
-def probe_transcript_status(ctx: FetchContext, meeting: dict) -> str:
+def probe_transcript_status(ctx: FetchContext, meeting: dict) -> str | None:
     """Tri-state availability from the caller's entitlement position.
 
     available   — transcripts exist AND are listable by this user
@@ -79,14 +84,36 @@ def probe_transcript_status(ctx: FetchContext, meeting: dict) -> str:
     unknown     — could not determine (403/4xx/5xx, resolution failure)
     """
     try:
-        online = graph.resolve_online_meeting(ctx.token, meeting["join_url"])
-        transcripts = graph.list_transcripts(ctx.token, online["id"])
+        artifact_kwargs = (
+            {"user_id": ctx.graph_user_id}
+            if ctx.graph_user_id else {}
+        )
+        online = graph.resolve_online_meeting(
+            ctx.token, meeting["join_url"], **artifact_kwargs
+        )
+        if ctx.access_gate == "attended":
+            attendance_seconds = graph.get_my_attendance_seconds(
+                ctx.token,
+                online["id"],
+                ctx.user_email,
+                occurrence_start=meeting.get("start"),
+                occurrence_end=meeting.get("end"),
+                **artifact_kwargs,
+            )
+            attended, _ = graph.check_attended_gate(attendance_seconds)
+            if not attended:
+                return None
+        transcripts = graph.list_transcripts(
+            ctx.token, online["id"], **artifact_kwargs
+        )
         segments = graph.transcripts_for_occurrence(
             transcripts, meeting.get("start"), meeting.get("end")
         )
         return "available" if segments else "unavailable"
-    except Exception:  # noqa: BLE001 — tri-state requires swallowing all probe failures
-        return "unknown"
+    except Exception:  # noqa: BLE001 — list probes never expose provider errors
+        # Attended mode is fail-closed: no positive attendance proof means the
+        # meeting is omitted before transcript metadata can be exposed.
+        return None if ctx.access_gate == "attended" else "unknown"
 
 
 # ---------- list ----------
@@ -95,15 +122,33 @@ def list_meetings(ctx: FetchContext, days: int,
                   only_with_transcripts: bool = False) -> tuple[list[dict], dict]:
     """Returns (raw meeting dicts for the caller's index cache, payload)."""
     days = max(1, min(int(days), 90))
-    meetings = graph.list_teams_meetings(ctx.token, days=days, limit=LIST_LIMIT)
+    calendar_kwargs = (
+        {"user_id": ctx.graph_user_id} if ctx.graph_user_id else {}
+    )
+    meetings = graph.list_teams_meetings(
+        ctx.token, days=days, limit=LIST_LIMIT, **calendar_kwargs
+    )
+    # The application token can reach tenant-wide artifacts. Apply the selected
+    # deterministic calendar gate before even probing transcript metadata.
+    meetings = [
+        meeting for meeting in meetings
+        if graph.check_calendar_gate(
+            meeting, ctx.user_email, ctx.access_gate
+        )[0]
+    ]
 
     # Probe availability concurrently — bounded; only on the list path, never
     # on the 60-day subject-search path.
     with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
         statuses = list(pool.map(lambda m: probe_transcript_status(ctx, m),
                                  meetings))
+    eligible: list[dict] = []
     for meeting, status in zip(meetings, statuses):
+        if status is None:
+            continue
         meeting["transcript_status"] = status
+        eligible.append(meeting)
+    meetings = eligible
 
     if only_with_transcripts:
         meetings = [m for m in meetings
@@ -111,6 +156,7 @@ def list_meetings(ctx: FetchContext, days: int,
 
     now = dt.datetime.now(dt.UTC)
     payload = {
+        "access_gate": ctx.access_gate,
         "meetings": [
             {
                 "id": make_meeting_id(m),
@@ -167,16 +213,19 @@ def resolve_target(ctx: FetchContext, meeting: str,
     # 1. Opaque occurrence id (preferred, unambiguous).
     if ref.startswith("mtg_"):
         event_id = _decode_meeting_id(ref)
-        # Fail fast: a genuine Exchange event id starts with "AAMk". Anything
-        # else is a forged/malformed handle — no Graph call, internals to the
-        # audit log only (never echoed to the caller).
-        if not event_id or not event_id.startswith("AAMk"):
+        # Fail fast: Exchange event IDs are base64-shaped and start with AAMk.
+        # Reject separators such as '.' before URL construction so a forged
+        # handle cannot alter the fixed caller-calendar path.
+        if not event_id or not _EVENT_ID.fullmatch(event_id):
             ctx.audit(None, "", "invalid_id",
                       f"malformed mtg_ handle (len={len(ref)})", None)
             return None, _err("invalid_id",
                               "That meeting id is not valid."), cached
         try:
-            raw = graph.get_event(ctx.token, event_id)
+            calendar_kwargs = (
+                {"user_id": ctx.graph_user_id} if ctx.graph_user_id else {}
+            )
+            raw = graph.get_event(ctx.token, event_id, **calendar_kwargs)
         except graph.OnlineMeetingNotFoundError:
             ctx.audit(None, "", "id_not_found", "event id absent from /me", None)
             return None, _err(
@@ -209,8 +258,11 @@ def resolve_target(ctx: FetchContext, meeting: str,
                           f"No meeting #{ref} in the last list."), cached
 
     # 3. Subject fragment (convenience; ambiguous matches never guess).
+    calendar_kwargs = (
+        {"user_id": ctx.graph_user_id} if ctx.graph_user_id else {}
+    )
     candidates = graph.list_teams_meetings(
-        ctx.token, days=SUBJECT_SEARCH_DAYS, limit=LIST_LIMIT
+        ctx.token, days=SUBJECT_SEARCH_DAYS, limit=LIST_LIMIT, **calendar_kwargs
     )
     needle = ref.lower()
     matches = [m for m in candidates if needle in m["subject"].lower()]
@@ -246,42 +298,70 @@ def fetch_transcript(ctx: FetchContext, target: dict, raw_vtt: bool = False) -> 
     attendance_seconds: int | None = None
     online: dict | None = None
     try:
-        # Invite gate — code-enforced.
-        allowed, reason = graph.check_attendance(target, user)
+        # Selected calendar gate — code-enforced.
+        allowed, reason = graph.check_calendar_gate(
+            target, user, ctx.access_gate
+        )
         if not allowed:
             ctx.audit(target, "", "rejected", reason, None)
-            return _err("not_attendee",
+            error_code = (
+                "not_accepted" if ctx.access_gate == "accepted"
+                else "not_attendee"
+            )
+            return _err(error_code,
                         f"Not fetching '{target['subject']}': {reason}. Only "
-                        "meetings you organized or accepted an invitation to "
-                        "are reachable.")
+                        f"meetings allowed by the '{ctx.access_gate}' access "
+                        "gate are reachable.")
 
-        still_ok, stale_reason = graph.revalidate_event(ctx.token, target, user)
+        calendar_kwargs = (
+            {"user_id": ctx.graph_user_id} if ctx.graph_user_id else {}
+        )
+        still_ok, stale_reason = graph.revalidate_event(
+            ctx.token, target, user, access_gate=ctx.access_gate,
+            **calendar_kwargs
+        )
         if not still_ok:
             ctx.audit(target, "", "rejected", f"stale selection: {stale_reason}", None)
             return _err("not_attendee",
                         f"Not fetching '{target['subject']}': the calendar event "
                         f"changed since listing — {stale_reason}.")
 
-        online = graph.resolve_online_meeting(ctx.token, target["join_url"])
+        artifact_kwargs = (
+            {"user_id": ctx.graph_user_id}
+            if ctx.graph_user_id else {}
+        )
+        online = graph.resolve_online_meeting(
+            ctx.token, target["join_url"], **artifact_kwargs
+        )
 
-        if ctx.attendance_mode == "strict":
+        if ctx.access_gate == "attended":
             try:
                 attendance_seconds = graph.get_my_attendance_seconds(
-                    ctx.token, online["id"], user
+                    ctx.token,
+                    online["id"],
+                    user,
+                    occurrence_start=target.get("start"),
+                    occurrence_end=target.get("end"),
+                    **artifact_kwargs,
                 )
             except graph.AttendanceReportUnavailableError as exc:
                 ctx.audit(target, online["id"], "attendance_unverifiable", str(exc), None)
                 return _err("attendance_unverifiable",
                             f"Cannot verify that you actually joined "
                             f"'{target['subject']}': {exc}.")
-            if attendance_seconds <= 0:
+            attended, attended_reason = graph.check_attended_gate(
+                attendance_seconds
+            )
+            if not attended:
                 ctx.audit(target, online["id"], "not_attended",
-                          "no attendance record with totalAttendanceInSeconds > 0", 0)
-                return _err("not_attendee",
+                          attended_reason, attendance_seconds)
+                return _err("not_attended",
                             f"Not fetching '{target['subject']}': the attendance "
                             "report shows you never joined this meeting.")
 
-        transcripts = graph.list_transcripts(ctx.token, online["id"])
+        transcripts = graph.list_transcripts(
+            ctx.token, online["id"], **artifact_kwargs
+        )
         segments = graph.transcripts_for_occurrence(
             transcripts, target.get("start"), target.get("end")
         )
@@ -292,7 +372,10 @@ def fetch_transcript(ctx: FetchContext, target: dict, raw_vtt: bool = False) -> 
                         "transcript for this occurrence. The meeting was likely "
                         "not transcribed — this is not an access error. Do not retry.")
         parts = [
-            graph.get_transcript_vtt(ctx.token, online["id"], s["id"]) for s in segments
+            graph.get_transcript_vtt(
+                ctx.token, online["id"], s["id"], **artifact_kwargs
+            )
+            for s in segments
         ]
     except graph.AccessDeniedError as exc:
         ctx.audit(target, online["id"] if online else "", "access_denied", str(exc),
@@ -341,18 +424,19 @@ def fetch_transcript(ctx: FetchContext, target: dict, raw_vtt: bool = False) -> 
         truncated = True
         ctx.audit(target, online["id"], "truncated", "", attendance_seconds)
 
-    attendance_basis = (
-        f"attendance verified: {attendance_seconds}s joined"
-        if attendance_seconds is not None
-        else "attendance basis: accepted invite only (invite mode)"
-    )
+    if attendance_seconds is not None:
+        access_basis = f"access gate: attended ({attendance_seconds}s joined)"
+    elif ctx.access_gate == "accepted":
+        access_basis = "access gate: accepted invitation"
+    else:
+        access_basis = "access gate: calendar invitation"
     header = (
         f"Meeting: {target['subject']}\n"
         f"Occurrence start: {_iso_z(target['start'])} · "
         f"Organizer: {target['organizer']} · "
         f"Transcript created: {created}"
         f"{' · segments: ' + str(len(parts)) if len(parts) > 1 else ''} · "
-        f"{attendance_basis}"
+        f"{access_basis}"
     )
     transcript = (
         f"{header}\n\n"

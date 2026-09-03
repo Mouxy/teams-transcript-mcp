@@ -39,11 +39,12 @@ def test_deployment_requires_subscription_and_tenant():
     assert "registrationState" in deploy
 
 
-def test_deployment_pins_and_validates_attendance_mode():
+def test_deployment_pins_and_validates_access_gate():
     deploy = (ROOT / "scripts" / "deploy_azure.sh").read_text()
-    assert 'ATTENDANCE_MODE="${ATTENDANCE_MODE:-invite}"' in deploy
-    assert 'TRANSCRIPT_SYNC_ATTENDANCE_MODE=$ATTENDANCE_MODE' in deploy
-    assert 'strict|invite' in deploy
+    assert 'ACCESS_GATE="${ACCESS_GATE:-invited}"' in deploy
+    assert 'TRANSCRIPT_SYNC_ACCESS_GATE=$ACCESS_GATE' in deploy
+    assert '--remove-env-vars TRANSCRIPT_SYNC_ATTENDANCE_MODE' in deploy
+    assert 'invited|accepted|attended' in deploy
 
 
 def test_deployment_uploads_certificate_content_not_a_local_path():
@@ -100,3 +101,37 @@ def test_setup_documentation_covers_required_public_configuration():
     )
     missing = [item for item in required if item not in readme]
     assert missing == []
+
+
+def test_tracked_public_tree_has_no_tenant_specific_markers():
+    # Build the names from fragments so the safeguard does not flag itself.
+    markers = (
+        "port" + "man",
+        "port" + "am",
+        "problem" + "shared",
+        "problem " + "shared",
+        "brave" + "glacier",
+        "lively" + "forest",
+        "2158" + "37d8",
+        "3785" + "f6fa",
+        "3326" + "1b99",
+        "ae52" + "461c",
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    offenders = []
+    for raw_path in tracked:
+        if not raw_path:
+            continue
+        path = ROOT / raw_path.decode()
+        try:
+            text = path.read_text(errors="ignore").casefold()
+        except OSError:
+            continue
+        if any(marker in text for marker in markers):
+            offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []

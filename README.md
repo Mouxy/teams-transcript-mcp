@@ -6,10 +6,10 @@ Microsoft Graph.
 
 It supports two transports:
 
-- **Cloud:** streamable HTTP, Microsoft Entra OAuth and an on-behalf-of (OBO)
-  exchange. The current release retrieves transcripts with the delegated user
-  token and therefore remains subject to that user's native Teams transcript
-  entitlement.
+- **Cloud:** streamable HTTP and Microsoft Entra OAuth for caller identity, with
+  application-only Microsoft Graph access for calendars and meeting artifacts.
+  Transcript retrieval does not depend on Teams sharing the transcript with the
+  caller.
 - **Local:** stdio, interactive Microsoft sign-in and an OS-keyring token cache.
 
 This project is not affiliated with Microsoft or Anthropic.
@@ -33,36 +33,36 @@ calendar event before each fetch, and records every attempt in an audit log.
 ```text
 Cloud MCP client ──HTTPS──> Transcript Sync
                              │ validates Entra JWT
-                             │ exchanges token through OBO
+                             │ pins calendar to caller oid
+                             │ enforces invitation guard
                              ▼
                         Microsoft Graph
-                 delegated access as the signed-in user
+                     application-only access
 ```
 
 The cloud process keeps caches per Entra object ID. It does not share meeting
 state between users. Scale-to-zero cold starts only clear those caches.
 
-> **Current limitation:** the deployed cloud path is delegated-only. A
-> certificate credential does not make its Graph calls app-only. The required
-> design for calendar/invite authorisation plus sharing-independent backend
-> retrieval is specified in
-> [Hybrid cloud transcript access](docs/hybrid-cloud-access.md), but is not yet
-> implemented.
+See [Application-only cloud transcript access](docs/application-cloud-access.md)
+for the complete request flow, permission model and guard invariants.
 
 ## Security model
 
 - Cloud requests validate the Entra issuer, exact API client-ID audience, expiry,
-  object ID and delegated `access_as_user` scope before OBO exchange.
-- A caller must be the meeting organiser or an accepted attendee.
-- The server resolves opaque meeting handles only through `/me/events/{id}`.
-- It rechecks deleted, cancelled, declined and changed events before fetching.
+  GUID object ID and delegated `access_as_user` scope before any Graph call.
+- One explicit access gate controls eligibility: `invited`, `accepted` or
+  `attended`. The default is `invited`.
+- The server pins opaque meeting handles to
+  `/users/{validated-caller-oid}/events/{id}`. It never accepts a mailbox ID,
+  organiser, join URL or Graph meeting ID from the MCP caller.
+- It rechecks deleted, cancelled and changed events before fetching.
 - Transcript text is returned between untrusted-content delimiters and capped
   at 200,000 characters. The MCP host must still treat it as untrusted data.
 - Cloud audit records go to stdout. Local audit records go to
   `~/.transcript-sync/audit.log` with user-only permissions.
-- `TRANSCRIPT_SYNC_ATTENDANCE_MODE=invite` is the default. `strict` additionally
-  requests an attendance report, but Microsoft Graph normally restricts that
-  delegated endpoint to organisers and co-organisers.
+- Set `TRANSCRIPT_SYNC_ACCESS_GATE` to `invited`, `accepted` or `attended`.
+  `attended` requires positive joined time from an application-authorised
+  attendance report before transcript metadata or content is returned.
 
 ## Prerequisites
 
@@ -86,37 +86,30 @@ For cloud mode:
 
 ## Required Microsoft Graph permissions
 
-### Current delegated implementation
+### Cloud transport
 
-Add these as **delegated** permissions to the Entra app:
+Add these **application** permissions to the Entra app and grant tenant admin
+consent:
+
+- `Calendars.Read`
+- `OnlineMeetings.Read.All`
+- `OnlineMeetingTranscript.Read.All`
+- `OnlineMeetingArtifact.Read.All`
+
+`OnlineMeetingRecording.Read.All` is not required. The exposed delegated
+`access_as_user` scope authenticates the caller to this API; it is not a
+Microsoft Graph permission. App-only meeting artifacts also require a Teams
+application access policy. See
+[Application-only cloud transcript access](docs/application-cloud-access.md).
+
+### Local transport
+
+The local stdio server uses these delegated Graph permissions:
 
 - `Calendars.Read`
 - `OnlineMeetings.Read`
 - `OnlineMeetingTranscript.Read.All`
 - `OnlineMeetingArtifact.Read.All`
-
-The last permission supports strict attendance checks. The default invite mode
-still requests the same fixed scope set so switching modes does not silently
-change consent.
-
-These scopes do not grant the backend independent access to transcript content.
-Microsoft can return transcript metadata and still deny content based on the
-signed-in user's Teams entitlement.
-
-### Hybrid sharing-independent cloud design
-
-The target cloud architecture keeps `Calendars.Read` delegated and adds these
-**application** permissions:
-
-- `OnlineMeetings.Read.All`
-- `OnlineMeetingTranscript.Read.All`
-- `OnlineMeetingArtifact.Read.All`
-
-It also requires tenant admin consent, a Teams application access policy, and
-runtime code that uses separate delegated and app-only tokens. Granting the
-roles alone does not upgrade the current release. See
-[Hybrid cloud transcript access](docs/hybrid-cloud-access.md) for the complete
-permission model, Teams PowerShell policy, limitations and rollout checks.
 
 ## Cloud setup
 
@@ -132,10 +125,8 @@ In the Microsoft Entra admin centre:
 6. Under **Authentication**, add these **Web** redirect URIs:
    - `https://claude.ai/api/mcp/auth_callback`
    - `https://claude.com/api/mcp/auth_callback`
-7. Under **API permissions**, add the four delegated Microsoft Graph
-   permissions listed above for the current release. Do not add the hybrid
-   application roles and assume they are active until the runtime supports the
-   app-only artifact path described in the design document.
+7. Under **API permissions**, add the four cloud application permissions listed
+   above and grant tenant admin consent.
 8. Under **Expose an API**, set an initial Application ID URI of
    `api://<client-id>` and add a delegated scope named `access_as_user`.
 9. Under **Certificates & secrets**, create a client secret for the MCP
@@ -145,7 +136,7 @@ Do not commit tenant IDs, client secrets, private certificates or `.env` files.
 A tenant ID and client ID are identifiers rather than passwords, but keeping
 instance-specific values out of the repository makes the deployment portable.
 
-### 2. Create the OBO certificate
+### 2. Create the application-authentication certificate
 
 Generate a private key and self-signed certificate locally:
 
@@ -169,7 +160,7 @@ combined PEM to Container Apps as a secret.
 ### 3. Grant consent and restrict access
 
 1. Open **Enterprise applications → Transcript Sync Cloud → Permissions**.
-2. Select **Grant admin consent** and accept the four delegated Graph scopes.
+2. Select **Grant admin consent** and accept the four Graph application roles.
 3. Read the permissions page back and confirm every permission shows
    **Granted for** your tenant. Clicking the consent button alone is not proof.
 4. Open **Properties**, set **Assignment required?** to **Yes**, and save.
@@ -217,7 +208,7 @@ scripts/deploy_azure.sh
 
 The script registers required Azure providers, creates an explicitly located
 Container Apps environment and Log Analytics workspace, builds the image,
-stores the OBO certificate as a Container Apps secret, and deploys with zero
+stores the application certificate as a Container Apps secret, and deploys with zero
 minimum replicas. It stops if the existing environment is in a different
 region.
 
@@ -243,6 +234,7 @@ TRANSCRIPT_SYNC_CLOUD_CLIENT_ID=<client ID>
 TRANSCRIPT_SYNC_SERVER_URL=https://<public-origin>
 TRANSCRIPT_SYNC_CLOUD_CERT_PEM=<combined PEM content or file path>
 TRANSCRIPT_SYNC_APP_NAME=Transcript Sync Cloud
+TRANSCRIPT_SYNC_ACCESS_GATE=invited
 ```
 
 `deploy_azure.sh` sets these values. Its `secretref:` value resolves to the PEM
@@ -292,8 +284,8 @@ The first command prints the connector secret once. Store it securely. The
 second command registers both Claude callbacks and changes the identifier URI
 and exposed scope to the deployed server origin. The scripts never mutate an
 existing app from a display-name match alone. A follow-up run must identify the
-app by its immutable client ID, and the cloud script verifies that the local OBO
-certificate matches a key credential registered on that app.
+app by its immutable client ID, and the cloud script verifies that the local
+application certificate matches a key credential registered on that app.
 
 ## Local stdio setup
 
@@ -338,7 +330,7 @@ Use an absolute path to `uv`; desktop applications often have a restricted
       "env": {
         "TRANSCRIPT_SYNC_TENANT_ID": "<tenant ID>",
         "TRANSCRIPT_SYNC_CLIENT_ID": "<client ID>",
-        "TRANSCRIPT_SYNC_ATTENDANCE_MODE": "invite"
+        "TRANSCRIPT_SYNC_ACCESS_GATE": "invited"
       }
     }
   }
@@ -367,10 +359,11 @@ For a cloud deployment:
 2. Call `/mcp` without a bearer token and confirm it returns `401` with a
    `WWW-Authenticate` resource-metadata link.
 3. Sign in as an assigned pilot user.
-4. Run `list_recent_meetings` and fetch one known transcript.
-5. Run a negative test with a user who is not assigned or an event outside the
-   caller's calendar.
-6. Confirm the audit entry appears in Container Apps logs.
+4. Run `list_recent_meetings` and fetch a known transcript for an invitation
+   whose RSVP is `notResponded`.
+5. Run a never-invited negative test and confirm the server makes no meeting-
+   artifact request.
+6. Confirm the allow and deny audit entries appear in Container Apps logs.
 
 The automated test suite mocks Microsoft Graph and makes no live tenant calls.
 
@@ -390,9 +383,9 @@ Claude's connector error identifies the failing stage:
   (client) ID GUID in `aud`. `TRANSCRIPT_SYNC_CLOUD_CLIENT_ID` is therefore the
   sole accepted JWT audience. The HTTPS origin remains the OAuth resource and
   scope prefix used by Claude and Entra.
-- **`AADSTS65001` during a tool call:** the connector token was accepted, but
-  the OBO exchange lacks tenant consent for one or more delegated Graph scopes.
-  Grant admin consent through the Enterprise application and verify the grant.
+- **`server_not_authorized` during a tool call:** the connector token was
+  accepted, but the backend could not acquire its application Graph token.
+  Verify the certificate and the four consented application roles.
 - **`Task group is not initialized`:** the outer ASGI application is not
   propagating the FastMCP session-manager lifespan.
 

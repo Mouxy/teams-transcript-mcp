@@ -3,8 +3,8 @@
 
 The script uses an existing certificate-authenticated Microsoft Graph caller
 with Application.ReadWrite.All to manage a single-tenant confidential client.
-It configures delegated Graph permissions, an exposed access_as_user scope,
-Claude connector callbacks and an OBO certificate.
+It configures application Graph permissions, an exposed access_as_user scope,
+Claude connector callbacks and an application-authentication certificate.
 
 Run it once before deployment, then again with --server-url after Azure assigns
 the Container App URL. Client-secret creation is explicit because Microsoft
@@ -30,9 +30,9 @@ from create_entra_app import caller_token, graph_call
 
 GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
 DEFAULT_APP_NAME = "Transcript Sync Cloud"
-DELEGATED_SCOPES = [
+APPLICATION_ROLES = [
     "Calendars.Read",
-    "OnlineMeetings.Read",
+    "OnlineMeetings.Read.All",
     "OnlineMeetingTranscript.Read.All",
     "OnlineMeetingArtifact.Read.All",
 ]
@@ -209,14 +209,18 @@ def main() -> None:
     token = caller_token(args.tenant, args.caller_client_id, args.caller_pem)
 
     graph_sp = graph_call(token, "GET", "/servicePrincipals", params={
-        "$filter": f"appId eq '{GRAPH_APP_ID}'", "$select": "oauth2PermissionScopes",
+        "$filter": f"appId eq '{GRAPH_APP_ID}'", "$select": "appRoles",
     })["value"][0]
-    scope_ids = {s["value"]: s["id"] for s in graph_sp["oauth2PermissionScopes"]}
-    missing = [scope for scope in DELEGATED_SCOPES if scope not in scope_ids]
+    role_ids = {
+        role["value"]: role["id"]
+        for role in graph_sp["appRoles"]
+        if "Application" in role.get("allowedMemberTypes", [])
+    }
+    missing = [role for role in APPLICATION_ROLES if role not in role_ids]
     if missing:
-        sys.exit(f"Scopes not found on Graph resource: {missing}")
+        sys.exit(f"Application roles not found on Graph resource: {missing}")
     resource_access = [
-        {"id": scope_ids[scope], "type": "Scope"} for scope in DELEGATED_SCOPES
+        {"id": role_ids[role], "type": "Role"} for role in APPLICATION_ROLES
     ]
 
     app, created = resolve_application(
@@ -268,7 +272,7 @@ def main() -> None:
         ):
             sys.exit(
                 f"The certificate at {cert_out} is not registered on app "
-                f"{app['appId']}. Refusing to deploy a mismatched OBO credential."
+                f"{app['appId']}. Refusing to deploy a mismatched app credential."
             )
     current_scopes = details.get("api", {}).get("oauth2PermissionScopes", [])
     access_scope = next(
@@ -327,7 +331,7 @@ def main() -> None:
             "keyCredentials": [{
                 "type": "AsymmetricX509Cert",
                 "usage": "Verify",
-                "displayName": "transcript-sync-cloud-obo",
+                "displayName": "transcript-sync-cloud-app-auth",
                 "key": base64.b64encode(
                     cert.public_bytes(serialization.Encoding.DER)
                 ).decode(),

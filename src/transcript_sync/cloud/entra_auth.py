@@ -3,13 +3,14 @@
 Validates v2.0 access tokens issued for this API. Microsoft Entra v2 access
 tokens use the API's application (client) ID GUID as the `aud` claim, even when
 the OAuth resource/scope is an HTTPS Application ID URI.
-Users exchange these for Graph tokens via OBO (obo.py) — the incoming token
-never reaches Graph directly.
+The cloud server uses the validated oid to pin application-only calendar calls
+to that caller. The incoming token never reaches Microsoft Graph.
 """
 
 from __future__ import annotations
 
 import time
+import uuid
 
 import jwt
 import requests
@@ -73,6 +74,10 @@ class EntraTokenValidator:
                 raise TokenValidationError(
                     f"required delegated scope missing: {self.required_scope}"
                 )
+            try:
+                claims["oid"] = str(uuid.UUID(str(claims["oid"])))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise TokenValidationError("oid must be a GUID") from exc
         except TokenValidationError:
             raise
         except jwt.ExpiredSignatureError as exc:

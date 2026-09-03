@@ -54,19 +54,34 @@ def test_vtt_unparsable_returns_none_not_raw():
     assert graph.vtt_to_dialogue("WEBVTT\n\nno cues here") is None
 
 
-# ---------- invite gate matrix ----------
+# ---------- calendar access gate matrix ----------
 
-@pytest.mark.parametrize("is_org,response,attendees,expected", [
-    (True, "organizer", [], True),                       # organizer
-    (False, "accepted", ["user@example.com"], True),        # accepted attendee
-    (False, "tentative", ["user@example.com"], False),      # tentative rejected
-    (False, "declined", ["user@example.com"], False),       # declined rejected
-    (False, "accepted", ["other@example.com"], False),        # not on attendee list
-    (False, "none", ["user@example.com"], False),           # never responded
+@pytest.mark.parametrize("gate,is_org,response,attendees,expected", [
+    ("invited", True, "organizer", [], True),
+    ("invited", False, "accepted", ["user@example.com"], True),
+    ("invited", False, "tentative", ["user@example.com"], True),
+    ("invited", False, "declined", ["user@example.com"], True),
+    ("invited", False, "notResponded", ["user@example.com"], True),
+    ("accepted", True, "organizer", [], True),
+    ("accepted", False, "accepted", ["user@example.com"], True),
+    ("accepted", False, "tentative", ["user@example.com"], False),
+    ("accepted", False, "declined", ["user@example.com"], False),
+    ("accepted", False, "notResponded", ["user@example.com"], False),
+    # Attended mode first requires a real invitation. Positive joined time is
+    # evaluated separately from an app-only attendance report.
+    ("attended", True, "organizer", [], True),
+    ("attended", False, "declined", ["user@example.com"], True),
+    ("attended", False, "accepted", ["other@example.com"], False),
 ])
-def test_invite_gate(is_org, response, attendees, expected):
-    m = make_event(is_org=is_org, response=response, attendees=attendees)
-    allowed, _ = graph.check_attendance(m, "user@example.com")
+def test_calendar_access_gate(gate, is_org, response, attendees, expected):
+    meeting = make_event(is_org=is_org, response=response, attendees=attendees)
+    allowed, _ = graph.check_calendar_gate(meeting, "user@example.com", gate)
+    assert allowed is expected
+
+
+@pytest.mark.parametrize("seconds,expected", [(1, True), (30, True), (0, False)])
+def test_attended_gate_requires_positive_joined_time(seconds, expected):
+    allowed, _ = graph.check_attended_gate(seconds)
     assert allowed is expected
 
 
@@ -265,14 +280,17 @@ def test_non_online_events_filtered(monkeypatch):
 
 # ---------- stale selection revalidation ----------
 
-def test_revalidation_rejects_declined_after_listing(monkeypatch):
+def test_revalidation_allows_declined_invitee(monkeypatch):
     m = make_event(response="accepted")
     declined_event = {"id": "evt-1", "isOrganizer": False,
                       "responseStatus": {"response": "declined"},
+                      "organizer": {"emailAddress": {
+                          "name": "Alice", "address": "alice@example.com"}},
+                      "onlineMeeting": {"joinUrl": "https://teams.microsoft.com/l/meetup-join/x"},
                       "attendees": [{"emailAddress": {"address": "user@example.com"}}]}
     monkeypatch.setattr(graph, "_get", lambda *a, **k: declined_event)
     ok, reason = graph.revalidate_event("tok", m, "user@example.com")
-    assert ok is False and "declined" in reason
+    assert ok is True and reason == "listed invitee"
 
 
 def test_revalidation_rejects_deleted_event(monkeypatch):
@@ -296,7 +314,7 @@ def test_audit_writes_record_with_permissions(tmp_path, monkeypatch):
     record = json.loads(line)
     assert record["result"] == "ok"
     assert record["user"] == "user@example.com"
-    assert record["attendance_mode"] == "invite"
+    assert record["access_gate"] == "invited"
     assert (tmp_path / "ts").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "ts" / "audit.log").stat().st_mode & 0o777 == 0o600
 
@@ -337,8 +355,8 @@ def test_never_invited_meeting_is_unreachable_by_design(monkeypatch):
     monkeypatch.setattr(server.core.graph, "list_teams_meetings",
                         lambda *a, **k: [make_event(subject="X and Y sync")])
     # User IS invited here (fixture) — but rejection happens at the gate:
-    monkeypatch.setattr(server.core.graph, "check_attendance",
-                        lambda m, u: (False, "not a confirmed participant"))
+    monkeypatch.setattr(server.core.graph, "check_calendar_gate",
+                        lambda m, u, g: (False, "not a confirmed participant"))
     monkeypatch.setattr(server.core.graph, "revalidate_event", lambda *a: (True, ""))
     monkeypatch.setattr(server, "_audit", lambda *a, **k: None)
     out = server.get_transcript("X and Y")
@@ -441,7 +459,7 @@ def test_graph_500_lands_in_taxonomy_not_raw(monkeypatch):
 
 def _ctx_for_probe():
     return server.core.FetchContext(token="t", user_email="user@example.com",
-                                    attendance_mode="invite",
+                                    access_gate="invited",
                                     audit=lambda *a, **k: None)
 
 

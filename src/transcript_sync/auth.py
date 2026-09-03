@@ -16,7 +16,7 @@ SCOPES = [
     "Calendars.Read",
     "OnlineMeetings.Read",
     "OnlineMeetingTranscript.Read.All",
-    "OnlineMeetingArtifact.Read.All",  # attendance reports (strict mode)
+    "OnlineMeetingArtifact.Read.All",  # attendance reports (`attended` gate)
 ]
 
 KEYRING_SERVICE = "transcript-sync-graph"

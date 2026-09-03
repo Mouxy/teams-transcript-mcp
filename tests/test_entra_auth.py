@@ -14,6 +14,7 @@ from transcript_sync.cloud.entra_auth import EntraTokenValidator, TokenValidatio
 TENANT = "11111111-2222-3333-4444-555555555555"
 CLIENT = "cloud-app-id"
 ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
+OID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 _key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
@@ -54,7 +55,7 @@ def _token(overrides: dict | None = None, exp_delta: int = 3600) -> str:
     now = int(time.time())
     claims = {
         "iss": ISSUER, "aud": CLIENT, "iat": now, "nbf": now - 60,
-        "exp": now + exp_delta, "oid": "user-oid-123",
+        "exp": now + exp_delta, "oid": OID,
         "preferred_username": "user@example.com",
         "scp": "access_as_user",
     }
@@ -66,7 +67,7 @@ def _token(overrides: dict | None = None, exp_delta: int = 3600) -> str:
 def test_valid_token_returns_claims(monkeypatch):
     v = _validator(monkeypatch)
     claims = v.validate(_token())
-    assert claims["oid"] == "user-oid-123"
+    assert claims["oid"] == OID
     assert claims["preferred_username"] == "user@example.com"
 
 
@@ -96,6 +97,12 @@ def test_missing_oid_rejected(monkeypatch):
         _key, algorithm="RS256", headers={"kid": "test-key"})
     with pytest.raises(TokenValidationError):
         v.validate(token)
+
+
+def test_non_guid_oid_rejected_before_it_can_form_a_graph_path(monkeypatch):
+    v = _validator(monkeypatch)
+    with pytest.raises(TokenValidationError, match="oid"):
+        v.validate(_token({"oid": "../another-mailbox"}))
 
 
 def test_missing_or_wrong_delegated_scope_rejected(monkeypatch):
